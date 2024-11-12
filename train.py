@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import Adam
@@ -8,8 +9,6 @@ from loss_functions import sdf
 from accelerate import Accelerator
 import argparse
 
-accelerator = Accelerator(mixed_precision='fp16', gradient_accumulation_steps=6)
-device = accelerator.device
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # tensor_0 = torch.zeros(1).to('cuda')
 p = argparse.ArgumentParser()
@@ -25,7 +24,10 @@ p.add_argument('--model_path', default=None, help='Checkpoint to trained model.'
 args = p.parse_args()
 
 sdf_dataset = dataio.PointCloud(args.data_path, on_surface_points=args.batch_size)
-dataloader = DataLoader(sdf_dataset, shuffle=True, batch_size=1, pin_memory=True, num_workers=0)
+dataloader = DataLoader(sdf_dataset, shuffle=True, batch_size=1, pin_memory=True, num_workers=4)
+
+accelerator = Accelerator(mixed_precision='fp16', gradient_accumulation_steps=len(dataloader))
+device = accelerator.device
 
 model = SirenNet(
     dim_in = 3,                        # input dimension, ex. 2d coor
@@ -44,7 +46,7 @@ model, optimizer, dataloader = accelerator.prepare(
 )
 
 loss_fn = sdf
-best_loss = 9999999.
+best_loss = float('inf')
 print("Training starts.")
 for epoch_index in range(args.num_epochs):
     running_loss = 0.
@@ -85,7 +87,25 @@ for epoch_index in range(args.num_epochs):
         #     running_loss = 0.
     last_loss = running_loss / batch_index
     print('Epoch {}  loss: {}\n'.format(epoch_index, last_loss))
-    if last_loss < best_loss:
-        best_loss = last_loss
-        print('Saving ckpt at Epoch {}  loss: {}\n'.format(epoch_index, last_loss))
-        torch.save(model.state_dict(), args.model_path)
+    # if last_loss < best_loss:
+    #     best_loss = last_loss
+    #     if accelerator.is_local_main_process:
+    #         os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+    #         print('Saving ckpt at Epoch {}  loss: {}\n'.format(epoch_index, last_loss))
+    #         torch.save(model.state_dict(), args.model_path)
+    all_losses = accelerator.gather(torch.tensor([last_loss]).to(device))
+
+    global_best_loss = torch.min(all_losses).item()
+
+    # If the current loss is the best, save the checkpoint in the process with the best loss
+    if global_best_loss < best_loss:
+        best_loss = global_best_loss
+        if last_loss == best_loss:
+            print(f'Saving checkpoint at Epoch {epoch_index} with loss: {last_loss}')
+            print(device)
+            # Ensure the model path exists and save the checkpoint
+            torch.save(model.state_dict(), args.model_path)
+
+    # Synchronize best loss across processes
+    # accelerator.wait_for_everyone()
+torch.save(model.state_dict(), args.model_path[:-4]+'_last.pth')
