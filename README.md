@@ -1,7 +1,11 @@
 Required packages:
+
 torch
+
 numpy
+
 siren-pytorch
+
 accelerate
 
 To test siren-pytorch installation run: python test.py
